@@ -652,6 +652,7 @@ class Client(MPDClient):
 		self._main_timeout_id=None
 		self.lib_path=None
 		self.current_cover=None
+		self.default_outputs=[]
 
 		# connect
 		self._settings.connect("changed::active-profile", self._on_active_profile_changed)
@@ -728,6 +729,7 @@ class Client(MPDClient):
 			if not self.lib_path:
 				self.lib_path=FALLBACK_LIB
 		if "status" in self.commands():
+			self.default_outputs=[o["outputname"] for o in self.outputs()]
 			self._main_timeout_id=GLib.timeout_add(self._refresh_interval, self._main_loop)
 			self.emitter.emit("reconnected")
 			return True
@@ -971,6 +973,7 @@ class Client(MPDClient):
 			self._main_timeout_id=None
 			self.lib_path=None
 			self.current_cover=None
+			self.default_outputs=[]
 			return False
 		return True
 
@@ -3228,6 +3231,10 @@ class PlaybackOptions(Gtk.ButtonBox):
 	def _on_reconnected(self, *args):
 		self.set_sensitive(True)
 
+class OutputButton(Gtk.CheckButton):
+	name=GObject.Property(type=str, default=None)
+	outputid=GObject.Property(type=int, default=None)
+
 class VolumeButton(Gtk.VolumeButton):
 	def __init__(self, client, settings):
 		super().__init__(orientation=Gtk.Orientation.HORIZONTAL, use_symbolic=True, can_focus=False)
@@ -3239,7 +3246,7 @@ class VolumeButton(Gtk.VolumeButton):
 		settings.bind("icon-size", self.get_child(), "pixel-size", Gio.SettingsBindFlags.GET)
 
 		# output plugins
-		self._output_box=Gtk.Box(orientation=Gtk.Orientation.VERTICAL, margin_start=10, margin_end=10, margin_bottom=10)
+		self._output_box=Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_start=10, margin_end=10, margin_bottom=10)
 
 		# popover
 		popover=self.get_popup()
@@ -3275,21 +3282,29 @@ class VolumeButton(Gtk.VolumeButton):
 	def _on_show(self, *args):
 		for button in self._output_box.get_children():
 			self._output_box.remove(button)
-		for output in self._client.outputs():
-			button=Gtk.ModelButton(label=f"{output['outputname']} ({output['plugin']})", role=Gtk.ButtonRole.CHECK, visible=True)
-			button.get_child().set_property("xalign", 0)
-			if output["outputenabled"] == "1":
-				button.set_property("active", True)
-			button.connect("clicked", self._on_button_clicked, output["outputid"])
+		outputs={o["outputname"]: (o["outputid"], o["outputenabled"]) for o in self._client.outputs() if o["plugin"] != "dummy"}
+		for name in self._client.default_outputs:
+			button=OutputButton(label=f"{name}", name=name, visible=True)
+			if (properties := outputs.get(name)) is not None:
+				button.set_active(properties[1] == "1")
+				button.set_property("outputid", int(properties[0]))
+
+			else:
+				button.set_inconsistent(True)
+			button.connect("clicked", self._on_button_clicked)
 			self._output_box.pack_start(button, False, False, 0)
 
-	def _on_button_clicked(self, button, out_id):
-		if button.get_property("active"):
-			self._client.disableoutput(out_id)
-			button.set_property("active", False)
+	def _on_button_clicked(self, button):
+		if button.get_inconsistent():
+			self._client.moveoutput(button.get_property("name"))
+			for output in self._client.outputs():
+				if output["outputname"] == button.get_property("name"):
+					button.set_active(output["outputenabled"] == "1")
+					button.set_property("outputid", int(output["outputid"]))
+					break
+			button.set_inconsistent(False)
 		else:
-			self._client.enableoutput(out_id)
-			button.set_property("active", True)
+			self._client.toggleoutput(button.get_property("outputid"))
 
 	def _on_reconnected(self, *args):
 		self.set_sensitive(True)
@@ -3297,6 +3312,25 @@ class VolumeButton(Gtk.VolumeButton):
 	def _on_disconnected(self, *args):
 		self.set_sensitive(False)
 		self._refresh(None, -1)
+
+class Test(Gtk.Box):
+	def __init__(self, client):
+		super().__init__(spacing=6)
+		self._client=client
+
+		button=Gtk.Button(image=Gtk.Image.new_from_icon_name("go-jump-symbolic", Gtk.IconSize.BUTTON), tooltip_text="Switch partition")
+		button.connect("clicked", self._on_button_clicked)
+
+		self.pack_start(button, False, False, 0)
+
+	def _on_button_clicked(self, *args):
+		partition=self._client.status()["partition"]
+		if partition == "default":
+			if "mpdevil" not in [p["partition"] for p in self._client.listpartitions()]:
+				self._client.newpartition("mpdevil")
+			self._client.partition("mpdevil")
+		else:
+			self._client.partition("default")
 
 ###################
 # MPD gio actions #
@@ -3482,6 +3516,9 @@ class MainWindow(Gtk.ApplicationWindow):
 		builder.add_from_resource("/org/mpdevil/mpdevil/ShortcutsWindow.ui")
 		self.set_help_overlay(builder.get_object("shortcuts_window"))
 
+		# test button
+		test=Test(self._client)
+
 		# widgets
 		self._paned0=Gtk.Paned()
 		self._paned2=Gtk.Paned()
@@ -3572,10 +3609,12 @@ class MainWindow(Gtk.ApplicationWindow):
 			self._header_bar.pack_start(self._back_button)
 			self._header_bar.pack_end(self._menu_button)
 			self._header_bar.pack_end(self._search_button)
+			self._header_bar.pack_end(test)
 		else:
 			action_bar.pack_start(self._back_button)
 			action_bar.pack_end(self._menu_button)
 			action_bar.pack_end(self._search_button)
+			action_bar.pack_end(test)
 		action_bar.pack_start(playback_control)
 		action_bar.pack_start(seek_bar)
 		action_bar.pack_start(audio)
